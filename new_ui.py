@@ -2,6 +2,11 @@ import streamlit as st
 import requests
 import fitz  # PyMuPDF
 from flask import Flask, request, jsonify
+import re
+from flask_cors import CORS
+import json  # Ensure this import is present
+import re  # Ensure this import is present
+from json import JSONDecodeError
 
 app = Flask(__name__)
 
@@ -95,6 +100,38 @@ def extract_text_from_pdf(pdf_file):
         pdf_content += page.get_text()
     return pdf_content
 
+def analyze_speech_and_score(speech_text):
+    """Analyze the provided speech text and generate a score and review."""
+    prompt = f"Analyze the following speech text: {speech_text} The speech txt might include repetition of some sentences and word it is because of the capturing process donot include it as a speakers repition or fault ignore that one aspect and analyze. Provide a score between 0 and 10 based on clarity, relevance, and technical depth. THE WHOLE REVIEW SHOULD BE ONLY 4 SMALL SENTENCES FOCUSING ON THE FINAL SCORE GENERATION AND NOTHING ELSE. Format your response as 'REVIEW: [your 4-sentence review] SCORE: [numerical score]'"
+    
+    response = chat_completion(prompt)
+
+    try:
+        response_json = json.loads(response) if isinstance(response, str) else response
+        response_text = response_json["choices"][0]["message"]["content"].strip()
+    except (JSONDecodeError, KeyError, TypeError):
+        response_text = str(response).strip()
+
+    # Extract review and score separately
+    review_match = re.search(r"REVIEW:\s*(.*?)\s*SCORE:", response_text, re.DOTALL)
+    review = review_match.group(1).strip() if review_match else "No review available."
+    
+    # Try to extract a numerical score from the response
+    score_match = re.search(r"SCORE:\s*(\d+(?:\.\d+)?)", response_text)
+    if score_match:
+        score = float(score_match.group(1))
+        score = min(max(score, 0), 10)  # Clamp score between 0 and 10
+    else:
+        # Fallback to searching for any number if the format wasn't followed
+        score_match = re.search(r"\b\d+(?:\.\d+)?\b", response_text)
+        if score_match:
+            score = float(score_match.group(0))
+            score = min(max(score, 0), 10)
+        else:
+            score = 7.5  # Default score if no number is found
+    
+    return {"score": score, "review": review}
+
 @app.route('/generate_questions', methods=['POST'])
 def api_generate_questions():
     if 'pdf_file' not in request.files:
@@ -124,6 +161,25 @@ def api_generate_nested_followup_questions():
     base_question = data.get('base_question')
     nested_followup_questions = generate_nested_followup_questions(base_question)
     return jsonify(nested_followup_questions)
+
+CORS(app)  # Enable CORS for all routes
+
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
+def analyze():
+    # For preflight OPTIONS requests
+    if request.method == 'OPTIONS':
+        response = app.make_default_options_response()
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        return response
+        
+    data = request.json
+    speech_text = data.get('speech_text')
+    if not speech_text:
+        return jsonify({'error': 'Invalid input'}), 400
+
+    result = analyze_speech_and_score(speech_text)
+    return jsonify(result)  # Now returns both score and review
 
 def main():
     st.set_page_config(page_title="Interview Prep", layout="wide")
